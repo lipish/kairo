@@ -64,8 +64,8 @@ export function useAgents() {
   useEffect(() => {
     apiListAgents()
       .then(setAgents)
-      .catch(() => {
-        /* backend may not be running */
+      .catch((err) => {
+        console.warn("Failed to connect to backend:", err.message);
       });
   }, []);
 

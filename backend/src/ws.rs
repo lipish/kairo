@@ -45,8 +45,12 @@ async fn handle_socket(socket: WebSocket, manager: AgentManager) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut event_rx = manager.subscribe();
 
-    // Forward agent events to the WebSocket client
-    let send_task = tokio::spawn(async move {
+    // Channel for outbound messages (used by both event forwarder and recv handler)
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<WsServerMessage>(64);
+
+    // Forward agent events to the outbound channel
+    let out_tx_events = out_tx.clone();
+    let event_task = tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
             let msg = match event {
                 AgentEvent::Output { agent_id, line } => {
@@ -63,6 +67,15 @@ async fn handle_socket(socket: WebSocket, manager: AgentManager) {
                 }
                 AgentEvent::Input { .. } => continue,
             };
+            if out_tx_events.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Send outbound messages to the WebSocket
+    let send_task = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
             let text = match serde_json::to_string(&msg) {
                 Ok(t) => t,
                 Err(_) => continue,
@@ -75,6 +88,7 @@ async fn handle_socket(socket: WebSocket, manager: AgentManager) {
 
     // Receive messages from the WebSocket client
     let mgr = manager.clone();
+    let out_tx_recv = out_tx.clone();
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
             match msg {
@@ -85,10 +99,20 @@ async fn handle_socket(socket: WebSocket, manager: AgentManager) {
                         Ok(WsClientMessage::SendInput { agent_id, input }) => {
                             if let Err(e) = mgr.send_input(&agent_id, &input).await {
                                 tracing::warn!("send_input error: {e}");
+                                let _ = out_tx_recv
+                                    .send(WsServerMessage::Error {
+                                        message: e.to_string(),
+                                    })
+                                    .await;
                             }
                         }
                         Err(e) => {
                             tracing::warn!("Invalid WS message: {e}");
+                            let _ = out_tx_recv
+                                .send(WsServerMessage::Error {
+                                    message: format!("Invalid message: {e}"),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -98,8 +122,9 @@ async fn handle_socket(socket: WebSocket, manager: AgentManager) {
         }
     });
 
-    // Wait for either task to finish, then abort the other
+    // Wait for either task to finish, then abort the others
     tokio::select! {
+        _ = event_task => {},
         _ = send_task => {},
         _ = recv_task => {},
     }

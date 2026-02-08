@@ -224,9 +224,16 @@ impl AgentManager {
             handle.pid
         };
 
-        // Send SIGKILL via OS — doesn't need the child handle
+        // Send SIGTERM first for graceful shutdown, then SIGKILL after timeout
         if let Some(pid) = pid {
             let pid = pid as i32;
+            // SAFETY: sending a signal to a valid PID
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            // Give the process a moment to exit gracefully
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // If still alive, force kill
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }

@@ -90,8 +90,8 @@ export class AgentWebSocket {
       try {
         const msg: ServerMessage = JSON.parse(event.data);
         this.handlers.forEach((h) => h(msg));
-      } catch {
-        // ignore non-JSON messages
+      } catch (e) {
+        console.warn("Failed to parse WebSocket message:", event.data, e);
       }
     };
 
